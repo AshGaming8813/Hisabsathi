@@ -151,7 +151,7 @@ export const App: React.FC = () => {
 
   // Compute financial summary
   const summary = computeFinancialSummary(accounts, transactions, udhaarContacts, bills);
-  const pendingCount = pendingAutoTransactions.filter((p) => p.status === 'pending').length;
+  const pendingCount = pendingAutoTransactions.filter((p: PendingAutoTransaction) => p.status === 'pending').length;
 
   // ----------------------------------------------------
   // AUTOMATIC TRANSACTION CONFIRMATION HANDLERS
@@ -649,7 +649,7 @@ export const App: React.FC = () => {
           <TransactionList
             transactions={transactions}
             accounts={accounts}
-            onSelectTransaction={(tx) => {
+            onSelectTransaction={(tx: Transaction) => {
               setEditingTransaction(tx);
               setIsAddTxModalOpen(true);
             }}
@@ -720,7 +720,7 @@ export const App: React.FC = () => {
 
         {activeTab === 'more' && (
           <MoreMenu
-            onNavigateTab={(tab) => setActiveTab(tab)}
+            onNavigateTab={(tab: any) => setActiveTab(tab)}
             onOpenImport={() => setIsImportModalOpen(true)}
             onLoadDemoData={() => seedDemoData(userId)}
             onClearAllData={() => clearAllUserData(userId)}

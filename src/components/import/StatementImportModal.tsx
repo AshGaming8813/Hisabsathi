@@ -43,7 +43,7 @@ export const StatementImportModal: React.FC<StatementImportModalProps> = ({
 
       // Select all non-duplicate rows by default
       const initialIndices = new Set<number>();
-      rows.forEach((r, idx) => {
+      rows.forEach((r: ParsedStatementRow, idx: number) => {
         if (!existingHashes.has(r.duplicateHash)) {
           initialIndices.add(idx);
         }
