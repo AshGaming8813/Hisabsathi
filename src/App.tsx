@@ -9,6 +9,8 @@ import {
 } from './db/database';
 import { computeFinancialSummary } from './utils/calculations';
 import { parseFinancialMessage } from './utils/smartParser';
+import { subscriptionServer } from './backend/subscriptionServer';
+import { checkFeatureEntitlement } from './services/entitlements';
 import { useAuth } from './context/AuthContext';
 import {
   Account,
@@ -20,6 +22,8 @@ import {
   PendingAutoTransaction,
   TransactionRule,
   AutoTrackingSettings,
+  UserSubscription,
+  ProFeatureKey,
 } from './types';
 
 // Layout
@@ -56,6 +60,12 @@ import { StatementImportModal } from './components/import/StatementImportModal';
 import { MoreMenu } from './components/more/MoreMenu';
 import { OnboardingModal } from './components/more/OnboardingModal';
 
+// Subscription & Payment System Components
+import { SubscriptionScreen } from './components/subscription/SubscriptionScreen';
+import { ProFeatureGateModal } from './components/subscription/ProFeatureGateModal';
+import { PaymentResultModal } from './components/subscription/PaymentResultModal';
+import { AdminSubscriptionDashboard } from './components/admin/AdminSubscriptionDashboard';
+
 // Declare global window property for native Android SMS Receiver
 declare global {
   interface Window {
@@ -66,7 +76,7 @@ declare global {
 
 export const App: React.FC = () => {
   const { userId, isOnboarded } = useAuth();
-  const [activeTab, setActiveTab] = useState<NavTab | 'reports' | 'bills'>('home');
+  const [activeTab, setActiveTab] = useState<NavTab | 'reports' | 'bills' | 'subscription' | 'admin_analytics'>('home');
 
   // Modals state
   const [isAddTxModalOpen, setIsAddTxModalOpen] = useState<boolean>(false);
@@ -78,6 +88,24 @@ export const App: React.FC = () => {
   const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
   const [isRulesModalOpen, setIsRulesModalOpen] = useState<boolean>(false);
   const [isPrivacyPermissionsOpen, setIsPrivacyPermissionsOpen] = useState<boolean>(false);
+
+  // Subscription state & entitlement dialogs
+  const [userSubscription, setUserSubscription] = useState<UserSubscription | null>(null);
+  const [isPro, setIsPro] = useState<boolean>(false);
+
+  const [gateModalState, setGateModalState] = useState<{
+    isOpen: boolean;
+    featureKey?: ProFeatureKey;
+    title?: string;
+    description?: string;
+  }>({ isOpen: false });
+
+  const [paymentResultState, setPaymentResultState] = useState<{
+    isOpen: boolean;
+    status: 'success' | 'failed' | 'pending';
+    subscription?: UserSubscription | null;
+    errorMessage?: string;
+  }>({ isOpen: false, status: 'success' });
 
   // Live Database Queries
   const accounts = useLiveQuery(() => db.accounts.where('userId').equals(userId).toArray(), [userId]) || [];
@@ -109,6 +137,16 @@ export const App: React.FC = () => {
     initDB();
   }, [userId, isOnboarded]);
 
+  // Fetch verified Pro entitlement status from trusted backend server
+  useEffect(() => {
+    async function fetchEntitlement() {
+      const sub = await subscriptionServer.getUserSubscription(userId);
+      setUserSubscription(sub);
+      setIsPro(sub.isPro);
+    }
+    fetchEntitlement();
+  }, [userId]);
+
   // Handle incoming SMS or Android Notifications dynamically
   useEffect(() => {
     const handleIncomingMessage = async (rawText: string, source: string) => {
@@ -124,17 +162,14 @@ export const App: React.FC = () => {
       });
 
       if (parsed) {
-        // If mode is auto_add_high_confidence and confidence >= 0.9
         if (
           autoSettings?.confirmationMode === 'auto_add_high_confidence' &&
           parsed.confidence >= 0.9 &&
           !parsed.isPossibleDuplicate &&
           !parsed.matchedUdhaarContactId
         ) {
-          // Auto add
           await handleConfirmAutoTransaction(parsed);
         } else {
-          // Save to pending inbox
           await db.pendingAutoTransactions.put(parsed);
         }
       }
@@ -148,6 +183,21 @@ export const App: React.FC = () => {
       delete window.onNotificationReceived;
     };
   }, [userId, autoSettings, transactions, pendingAutoTransactions, udhaarContacts, transactionRules]);
+
+  // Helper function to trigger Pro Feature Gating Modal for free users
+  const gateFeature = (featureKey: ProFeatureKey, title?: string, description?: string): boolean => {
+    const check = checkFeatureEntitlement(isPro, featureKey);
+    if (!check.allowed) {
+      setGateModalState({
+        isOpen: true,
+        featureKey,
+        title: title || `${check.featureName} Requires Pro`,
+        description: description || check.reason,
+      });
+      return false;
+    }
+    return true;
+  };
 
   // Compute financial summary
   const summary = computeFinancialSummary(accounts, transactions, udhaarContacts, bills);
@@ -163,7 +213,6 @@ export const App: React.FC = () => {
   ) => {
     const accId = customAccountId || accounts[0]?.id || '';
 
-    // Add confirmed transaction
     await db.transactions.add({
       id: `tx_auto_${Date.now()}`,
       userId,
@@ -186,7 +235,6 @@ export const App: React.FC = () => {
       createdAt: new Date().toISOString(),
     });
 
-    // Update pending status
     await db.pendingAutoTransactions.update(item.id, { status: 'confirmed' });
     await recalculateAccountBalances(userId);
   };
@@ -612,12 +660,14 @@ export const App: React.FC = () => {
         {activeTab === 'home' && (
           <div className="space-y-4 pb-20">
             {/* Hero & Financial Overview Cards */}
-            <SummaryCards summary={summary} onNavigateTab={(tab) => setActiveTab(tab)} />
+            <SummaryCards summary={summary} onNavigateTab={(tab: any) => setActiveTab(tab)} />
 
-            {/* Compact Automatic Money Tracking Card (Requirement #14) */}
+            {/* Compact Automatic Money Tracking Card */}
             <AutoTrackingHomeCard
               pendingCount={pendingCount}
-              onReviewNow={() => setActiveTab('auto_inbox')}
+              onReviewNow={() => {
+                if (gateFeature('auto_tracking')) setActiveTab('auto_inbox');
+              }}
               onManageSettings={() => setIsPrivacyPermissionsOpen(true)}
             />
 
@@ -637,7 +687,7 @@ export const App: React.FC = () => {
               transactions={transactions}
               accounts={accounts}
               onViewAll={() => setActiveTab('transactions')}
-              onSelectTransaction={(tx) => {
+              onSelectTransaction={(tx: Transaction) => {
                 setEditingTransaction(tx);
                 setIsAddTxModalOpen(true);
               }}
@@ -672,7 +722,9 @@ export const App: React.FC = () => {
             onIgnoreTransaction={handleIgnoreTransaction}
             onRestoreTransaction={handleRestoreTransaction}
             onDeletePermanently={handleDeletePermanently}
-            onOpenRulesManager={() => setIsRulesModalOpen(true)}
+            onOpenRulesManager={() => {
+              if (gateFeature('custom_rules')) setIsRulesModalOpen(true);
+            }}
             onOpenPrivacyPermissions={() => setIsPrivacyPermissionsOpen(true)}
           />
         )}
@@ -718,10 +770,39 @@ export const App: React.FC = () => {
           />
         )}
 
+        {activeTab === 'subscription' && (
+          <SubscriptionScreen
+            userId={userId}
+            onBack={() => setActiveTab('more')}
+            onPaymentSuccess={(sub: UserSubscription) => {
+              setIsPro(true);
+              setUserSubscription(sub);
+              setPaymentResultState({
+                isOpen: true,
+                status: 'success',
+                subscription: sub,
+              });
+            }}
+            onPaymentFailed={(msg: string) => {
+              setPaymentResultState({
+                isOpen: true,
+                status: 'failed',
+                errorMessage: msg,
+              });
+            }}
+          />
+        )}
+
+        {activeTab === 'admin_analytics' && (
+          <AdminSubscriptionDashboard onBack={() => setActiveTab('more')} />
+        )}
+
         {activeTab === 'more' && (
           <MoreMenu
             onNavigateTab={(tab: any) => setActiveTab(tab)}
             onOpenImport={() => setIsImportModalOpen(true)}
+            onOpenSubscription={() => setActiveTab('subscription')}
+            onOpenAdminDashboard={() => setActiveTab('admin_analytics')}
             onLoadDemoData={() => seedDemoData(userId)}
             onClearAllData={() => clearAllUserData(userId)}
             transactions={transactions}
@@ -729,6 +810,7 @@ export const App: React.FC = () => {
             pendingAutoTransactions={pendingAutoTransactions}
             rules={transactionRules}
             autoSettings={autoSettings}
+            isPro={isPro}
           />
         )}
       </main>
@@ -742,10 +824,17 @@ export const App: React.FC = () => {
         }}
       />
 
-      {/* Bottom Navigation (With Auto Transactions Inbox Tab & Notification Badge) */}
+      {/* Bottom Navigation */}
       <BottomNav
-        activeTab={activeTab === 'reports' || activeTab === 'bills' ? 'more' : (activeTab as NavTab)}
-        setActiveTab={(tab) => setActiveTab(tab)}
+        activeTab={
+          activeTab === 'reports' ||
+          activeTab === 'bills' ||
+          activeTab === 'subscription' ||
+          activeTab === 'admin_analytics'
+            ? 'more'
+            : (activeTab as NavTab)
+        }
+        setActiveTab={(tab: any) => setActiveTab(tab)}
         pendingAutoCount={pendingCount}
       />
 
@@ -795,6 +884,25 @@ export const App: React.FC = () => {
         isOpen={isPrivacyPermissionsOpen}
         onClose={() => setIsPrivacyPermissionsOpen(false)}
         settings={autoSettings}
+      />
+
+      {/* Subscription Feature Gate Modal & Payment Result Dialogs */}
+      <ProFeatureGateModal
+        isOpen={gateModalState.isOpen}
+        onClose={() => setGateModalState({ isOpen: false })}
+        onViewPro={() => setActiveTab('subscription')}
+        featureKey={gateModalState.featureKey}
+        customTitle={gateModalState.title}
+        customDescription={gateModalState.description}
+      />
+
+      <PaymentResultModal
+        isOpen={paymentResultState.isOpen}
+        onClose={() => setPaymentResultState({ isOpen: false, status: 'success' })}
+        status={paymentResultState.status}
+        subscription={paymentResultState.subscription}
+        errorMessage={paymentResultState.errorMessage}
+        onTryAgain={() => setActiveTab('subscription')}
       />
     </AppLayout>
   );
